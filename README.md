@@ -13,8 +13,39 @@ Fork it, rename `Checkout` into whatever you're building (an invoice, a ticket, 
 
 ---
 
+## AgentPay Invoice — live deployment (Aevum Builder Challenge #1)
+
+This repo is the **AgentPay Invoice** submission: a tUSD8 invoice cashier with the
+amount locked in on chain (`InvoiceCheckout`), a Confirmation-of-Payee registry
+(`PayeeRegistry`), and a budget-controlled agent wallet (`AgentWallet`: per-period
+budget cap, session expiry, payee allowlist, instant revoke). An agent pays invoices
+gaslessly via EIP-3009 (`payWithAuthorization`, nonce bound to payer + invoice).
+Built on the Aevum Starter Kit (MIT, PQA Labs).
+
+**Deployed on Aevum testnet (chain 44005), 22 Nov 2026**, by
+`0x29EEbb597abab8208dDf9Af845E11FcceBC44948` from commit
+`93289ae321ab80c004141059f3b658b43ddb3184`. (The explorer's contract-verification
+feature is not live yet, so the addresses + this exact commit are the reference.)
+
+| Contract | Address | Deploy tx |
+|---|---|---|
+| InvoiceCheckout | [`0x1eeE2A5CeBe0CF61A042cEBbE649c8eE31b5F6A2`](https://explorer-test.qday.info/address/0x1eeE2A5CeBe0CF61A042cEBbE649c8eE31b5F6A2) | [`0x672cd657…2026369f`](https://explorer-test.qday.info/tx/0x672cd65791ccf0885961c1354922f962866268aaf4bd6097083d894b2026369f) |
+| PayeeRegistry | [`0x7424F543673488C1aD319Af1EedE639AB50Fa52b`](https://explorer-test.qday.info/address/0x7424F543673488C1aD319Af1EedE639AB50Fa52b) | [`0xb8b6f0a9…f15eafa4`](https://explorer-test.qday.info/tx/0xb8b6f0a9a4c5498e45cf9da7e4e444333847b39e23b91e3ec839d841f15eafa4) |
+| AgentWallet | [`0x9C80e633937D1e61d40a43709f9c5a5E47A957b9`](https://explorer-test.qday.info/address/0x9C80e633937D1e61d40a43709f9c5a5E47A957b9) | [`0x958dc35a…f063f`](https://explorer-test.qday.info/tx/0x958dc35a220e0d4bd6c8d95c5d5946963ec7abadb09e5987213cdc0b643f063f) |
+| Checkout (starter kit) | [`0x71f6bC3F9854900095d9A469911f2962DA88168F`](https://explorer-test.qday.info/address/0x71f6bC3F9854900095d9A469911f2962DA88168F) | [`0x52681374…223a5dcc`](https://explorer-test.qday.info/tx/0x52681374d8aef6adc4efe470b88b7cdf36e4a07dfc675033aa40b5fa223a5dcc) |
+
+**Proof transactions (22 Nov 2026)** — payee `agentpay-merchant` registered in the
+registry, resolving to `0x482EC60cAF715E7Bd06Ddd1176AEa7855697A758`:
+
+- Register payee: [`0xa696c717…bf3d2b71`](https://explorer-test.qday.info/tx/0xa696c71797fe400f20bb34a19ab9a37ab2e690b7afd98324452e08f8bf3d2b71)
+- Invoice #1 (1 tUSD8, id `0x8a5779f7…d50135c9`): [create](https://explorer-test.qday.info/tx/0xf5913e747635d0bd4b29d4961187fa67281a9977986dce6e76385fe85b5f4abb) → [pay (standard)](https://explorer-test.qday.info/tx/0xb2c31b4c2da2d98a6ba8c25cda0e7b51858351de22eb183abdd27347c3a1971c) → status **Paid**
+- Invoice #2 (1 tUSD8, id `0x6d8c2950…a3dc7f7`): [create](https://explorer-test.qday.info/tx/0x0eb9788c8794427f658c0c10ac0066016df0252c7fea7d1f3a11571c8885af39) → [payWithAuthorization (gasless EIP-3009)](https://explorer-test.qday.info/tx/0x5cd4351e58eb2564a4d23de2ba48fde055cf4a31b95ba575dc44fb8d855d132e) → status **Paid**
+
+---
+
 ## Contents
 
+- [AgentPay Invoice — live deployment](#agentpay-invoice--live-deployment-aevum-builder-challenge-1)
 - [Quickstart (5 minutes, no funds needed)](#quickstart-5-minutes-no-funds-needed)
 - [Network details](#network-details)
 - [Get test tokens](#get-test-tokens)
