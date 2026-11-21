@@ -17,7 +17,7 @@ AMOUNT      ?= 100
 # `make fork` runs under its own chain ID so wallets and signatures never mix it up with the real testnet.
 FORK_CHAIN  := 440050
 
-.PHONY: help install build test test-fork check anvil fork deploy-local deploy-fork deploy-aevum mint deal dev
+.PHONY: help install build test test-fork check anvil fork deploy-local deploy-fork deploy-aevum smoke-fork mint deal dev
 
 help: ## Show this list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36mmake %-14s\033[0m %s\n", $$1, $$2}'
@@ -45,13 +45,13 @@ anvil: ## Empty local chain (31337) with Aevum's EVM rules
 fork: ## Local copy of Aevum testnet on 127.0.0.1:8555 (chain 440050)
 	anvil --fork-url $(AEVUM_RPC) --hardfork shanghai --chain-id $(FORK_CHAIN) --port $(FORK_PORT)
 
-deploy-local: ## Deploy MockUSD8 + Checkout to `make anvil`
+deploy-local: ## Deploy MockUSD8 + Checkout + AgentPay contracts to `make anvil`
 	cd contracts && forge script script/Deploy.s.sol --rpc-url $(LOCAL_RPC) --broadcast --unlocked --sender $(ANVIL_0)
 
 # Deploy from a random address nobody has the key for (anvil impersonates it), not from a public
 # anvil account. Otherwise the fork's contract addresses could be claimed on the real testnet by
 # anyone holding that public key.
-deploy-fork: ## Deploy Checkout (real tUSD8) to `make fork`
+deploy-fork: ## Deploy Checkout + AgentPay contracts (real tUSD8) to `make fork`
 	@test "$$(cast chain-id --rpc-url $(FORK_RPC))" = "$(FORK_CHAIN)" || (echo "This only works on 'make fork'." && exit 1)
 	@DEPLOYER=$$(cast to-check-sum-address 0x$$(openssl rand -hex 20)); \
 	  cast rpc anvil_setBalance $$DEPLOYER 0x8ac7230489e80000 --rpc-url $(FORK_RPC) > /dev/null && \
@@ -59,9 +59,20 @@ deploy-fork: ## Deploy Checkout (real tUSD8) to `make fork`
 	  echo "Deploying from throwaway address $$DEPLOYER (no private key exists for it)" && \
 	  cd contracts && MERCHANT=$${MERCHANT:-$(ANVIL_0)} forge script script/Deploy.s.sol --rpc-url $(FORK_RPC) --broadcast --unlocked --sender $$DEPLOYER
 
-deploy-aevum: ## Deploy Checkout to Aevum testnet. Needs ACCOUNT=<keystore name> (see README)
+deploy-aevum: ## Deploy Checkout + AgentPay contracts to Aevum testnet. Needs ACCOUNT=<keystore name> (see README)
 	@test -n "$(ACCOUNT)" || (echo "Set ACCOUNT=<name>. Create one with: cast wallet import <name> --interactive" && exit 1)
 	cd contracts && forge script script/Deploy.s.sol --rpc-url $(AEVUM_RPC) --broadcast --legacy --account $(ACCOUNT)
+
+smoke-fork: ## Post-deploy smoke on `make fork`: create invoice -> pay exact -> Paid. Needs INVOICE_CHECKOUT=<address from deploy-fork>
+	@test -n "$(INVOICE_CHECKOUT)" || (echo "Usage: make smoke-fork INVOICE_CHECKOUT=0x..." && exit 1)
+	@test "$$(cast chain-id --rpc-url $(FORK_RPC))" = "$(FORK_CHAIN)" || (echo "This only works on 'make fork'." && exit 1)
+	@PAYER=$$(cast to-check-sum-address 0x$$(openssl rand -hex 20)); \
+	  cast rpc anvil_setBalance $$PAYER 0x8ac7230489e80000 --rpc-url $(FORK_RPC) > /dev/null && \
+	  cast rpc anvil_impersonateAccount $$PAYER --rpc-url $(FORK_RPC) > /dev/null && \
+	  echo "Smoke payer: throwaway address $$PAYER (no private key exists for it)" && \
+	  $(MAKE) --no-print-directory deal TO=$$PAYER AMOUNT=10 && \
+	  cd contracts && INVOICE_ID=$$(cast keccak "agentpay-smoke-$$(date +%s)") INVOICE_CHECKOUT=$(INVOICE_CHECKOUT) \
+	    forge script script/Smoke.s.sol --rpc-url $(FORK_RPC) --broadcast --unlocked --sender $$PAYER
 
 mint: ## `make anvil` only: mint AMOUNT MockUSD8 to TO. Needs CHECKOUT=<address>
 	@test -n "$(TO)" -a -n "$(CHECKOUT)" || (echo "Usage: make mint TO=0x... CHECKOUT=0x... [AMOUNT=100]" && exit 1)
