@@ -48,7 +48,7 @@ Session: budget cap 1,000,000 base units (1 tUSD8), period 604800 s (7 days), ag
 - **#4 — Over-budget payment reverts:** [configure session](https://explorer-test.qday.info/tx/0x3cad38c31779eb127bc89fed708d6ed337a5c4e21e27d0acf8dde66cfec2608c) (block 4057235) → [pay 500,000 — success](https://explorer-test.qday.info/tx/0x47d049d2cbb14ab010377122e4e21c7ee79bd59950b0a808075894497186a30a) (block 4057265, spent 500,000, remaining 500,000) → [pay 600,000 — **REVERT, receipt status 0x0**](https://explorer-test.qday.info/tx/0xd0d023d5584a9a6024140f44f647a8c9b55a428762800b14a0213048d5a5f576) (block 4057287; simulated first: `BudgetExceeded(500000, 600000)`). State after: spent still 500,000, balances unchanged.
 - **#5 — Payment after revoke reverts:** [revoke](https://explorer-test.qday.info/tx/0x2e27e6dd6b238cda4814398c156e0fee4b02631452897170f5a54b3b9945e785) (block 4057310, `sessionActive` → false) → [pay 100,000 — **REVERT, receipt status 0x0**](https://explorer-test.qday.info/tx/0x53abbfa6143afd3ca3d26c58d855ceef03ba295b0696bebd3d66314b8aae5352) (block 4057326; simulated first: `SessionRevokedError`). Final state: `revoked` = true, `sessionActive` = false, spent 500,000, wallet 0 tUSD8, payee 3.0 tUSD8.
 - Note: the scenario ran in two cycles — in cycle 1 `cast send` refused to broadcast the reverting calls at gas estimation (the RPC itself returned the exact revert data, so no receipt was mined); cycle 2 repeated the scenario with identical parameters and an explicit `--gas-limit 150000`, mining both 0x0 receipts above. Full step log: `scenarios-4-5-results.json` in the repo root (25 Nov 2026).
-- **Live demo URL:** TBD — the web demo has not been deployed yet (Vercel, `aevum`-only mode). This section will link it once it is live.
+- **Live demo URL:** https://agentpay-invoice-m3yekf9nv-lanifa27.vercel.app (Vercel, `aevum`-only mode, public — no login needed).
 
 ---
 
@@ -198,11 +198,9 @@ Everything below was run against the exact deployed commit
 No funds are needed for the local steps — the fork copies Aevum's real state and
 `make deal` gives you virtual test balances.
 
-> **Public repo URL: TBD.** The code currently lives in a local repo; the public
-> push to GitHub (`nwijaya26`) is still pending. Until the remote is live, clone
-> the published repo once its URL is announced, or work from the starter-kit
-> baseline the repo was built on
-> (`https://github.com/qday-io/aevum-starter-kit.git`, baseline `e87bcff`) and
+> **Public repo URL: https://github.com/nwijaya26/agentpay-invoice.** The code
+> is public on GitHub (`nwijaya26`). If you work from the starter-kit
+> baseline instead (`https://github.com/qday-io/aevum-starter-kit.git`, baseline `e87bcff`),
 > apply the AgentPay commits on top. Every command below is the same either way.
 
 ### Prerequisites
@@ -215,8 +213,8 @@ No funds are needed for the local steps — the fork copies Aevum's real state a
 ### 1. Clone and install
 
 ```bash
-git clone --recursive <public-repo-url>   # TBD — see note above
-cd <repo>
+git clone --recursive https://github.com/nwijaya26/agentpay-invoice.git
+cd agentpay-invoice
 make install          # Solidity libs + JS packages
 ```
 
@@ -302,9 +300,8 @@ pnpm example read-payments    # every Paid event, 1,000 blocks at a time
 
 Verify each result on chain: `statusOf(invoiceId)` must read `2` (`Paid`), and the
 payee's tUSD8 balance must have grown by exactly the invoice amount. The live
-proof transactions for scenarios #1–#3 are linked in the
-[live deployment](#agentpay-invoice--live-deployment-aevum-builder-challenge-1) section;
-scenarios #4 (over-budget revert) and #5 (post-revoke revert) are still TBD there.
+proof transactions for scenarios #1–#5 are linked in the
+[live deployment](#agentpay-invoice--live-deployment-aevum-builder-challenge-1) section.
 
 ---
 
