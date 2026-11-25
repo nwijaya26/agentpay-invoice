@@ -41,11 +41,279 @@ registry, resolving to `0x482EC60cAF715E7Bd06Ddd1176AEa7855697A758`:
 - Invoice #1 (1 tUSD8, id `0x8a5779f7…d50135c9`): [create](https://explorer-test.qday.info/tx/0xf5913e747635d0bd4b29d4961187fa67281a9977986dce6e76385fe85b5f4abb) → [pay (standard)](https://explorer-test.qday.info/tx/0xb2c31b4c2da2d98a6ba8c25cda0e7b51858351de22eb183abdd27347c3a1971c) → status **Paid**
 - Invoice #2 (1 tUSD8, id `0x6d8c2950…a3dc7f7`): [create](https://explorer-test.qday.info/tx/0x0eb9788c8794427f658c0c10ac0066016df0252c7fea7d1f3a11571c8885af39) → [payWithAuthorization (gasless EIP-3009)](https://explorer-test.qday.info/tx/0x5cd4351e58eb2564a4d23de2ba48fde055cf4a31b95ba575dc44fb8d855d132e) → status **Paid**
 
+### Proof scenarios #4–#5 — ✅ proven on-chain (25 Nov 2026)
+
+Session: budget cap 1,000,000 base units (1 tUSD8), period 604800 s (7 days), agent = owner = burner, payee `agentpay-merchant` allowlisted. All receipts verified via `cast receipt` + `cast call` on chain 44005.
+
+- **#4 — Over-budget payment reverts:** [configure session](https://explorer-test.qday.info/tx/0x3cad38c31779eb127bc89fed708d6ed337a5c4e21e27d0acf8dde66cfec2608c) (block 4057235) → [pay 500,000 — success](https://explorer-test.qday.info/tx/0x47d049d2cbb14ab010377122e4e21c7ee79bd59950b0a808075894497186a30a) (block 4057265, spent 500,000, remaining 500,000) → [pay 600,000 — **REVERT, receipt status 0x0**](https://explorer-test.qday.info/tx/0xd0d023d5584a9a6024140f44f647a8c9b55a428762800b14a0213048d5a5f576) (block 4057287; simulated first: `BudgetExceeded(500000, 600000)`). State after: spent still 500,000, balances unchanged.
+- **#5 — Payment after revoke reverts:** [revoke](https://explorer-test.qday.info/tx/0x2e27e6dd6b238cda4814398c156e0fee4b02631452897170f5a54b3b9945e785) (block 4057310, `sessionActive` → false) → [pay 100,000 — **REVERT, receipt status 0x0**](https://explorer-test.qday.info/tx/0x53abbfa6143afd3ca3d26c58d855ceef03ba295b0696bebd3d66314b8aae5352) (block 4057326; simulated first: `SessionRevokedError`). Final state: `revoked` = true, `sessionActive` = false, spent 500,000, wallet 0 tUSD8, payee 3.0 tUSD8.
+- Note: the scenario ran in two cycles — in cycle 1 `cast send` refused to broadcast the reverting calls at gas estimation (the RPC itself returned the exact revert data, so no receipt was mined); cycle 2 repeated the scenario with identical parameters and an explicit `--gas-limit 150000`, mining both 0x0 receipts above. Full step log: `scenarios-4-5-results.json` in the repo root (25 Nov 2026).
+- **Live demo URL:** TBD — the web demo has not been deployed yet (Vercel, `aevum`-only mode). This section will link it once it is live.
+
+---
+
+## AgentPay Invoice — problem, architecture, workflow
+
+### Problem statement
+
+An autonomous agent that pays real invoices needs money movement with guardrails,
+not a blank cheque. Three things go wrong with a plain checkout:
+
+1. **The amount is not locked in.** The starter kit's `Checkout` lets anyone pay any
+   order with any amount — `pay(orderId, 1)` marks an order paid for 0.000001 tUSD8.
+   A merchant cannot trust `isPaid` alone.
+2. **The payee is not verified.** Nothing checks that the address on an invoice is
+   really the merchant it claims to be.
+3. **The agent is unconstrained.** A wallet that an agent controls can drain
+   everything, to anyone, at any time — no budget, no expiry, no allowlist, no
+   off-switch.
+
+AgentPay Invoice fixes all three on chain: the invoice amount is locked at
+creation (`InvoiceCheckout`), the payee name is verified before payment
+(`PayeeRegistry`, Confirmation-of-Payee), and the agent spends only inside a
+budgeted, expiring, allowlisted session the owner can revoke instantly
+(`AgentWallet`). The agent itself never needs gas: it signs an EIP-3009
+authorization and a relayer submits it (`payWithAuthorization`).
+
+### Architecture
+
+```mermaid
+flowchart LR
+    Merchant["Merchant\n(createInvoice)"] --> IC["InvoiceCheckout\n0x1eeE…5F6A2"]
+    Registry["PayeeRegistry\n0x7424…a52b\nregister / resolve / verify"] --> Agent["Agent script\npay-invoice-agent.ts"]
+    Agent -->|1. verify name → address| Registry
+    Agent -->|2. check session, allowlist,\nremaining budget| AW["AgentWallet\n0x9C80…57b9\nconfigureSession / revoke\nsetPayeeAllowed / payInvoice"]
+    Agent -->|3. sign EIP-3009\nReceiveWithAuthorization\nnonce = keccak256(payer, invoiceId)| IC
+    Relayer["Relayer\n(submits tx, pays gas)"] -->|payWithAuthorization| IC
+    AW -->|payInvoice: forceApprove exact amount\nthen checkout.pay| IC
+    IC -->|transferFrom / safeTransfer| Payee["Payee\ntUSD8 0x4565…483"]
+    IC -->|Paid event = on-chain receipt| Explorer["Explorer\n explorer-test.qday.info"]
+```
+
+Contract roles (source: `contracts/src/`):
+
+| Contract | What it does | Key functions |
+|---|---|---|
+| `InvoiceCheckout` | Invoice with the amount locked in at creation; per-invoice token, deadline, cancel/refund; money goes straight to the payee, nothing is escrowed. | `createInvoice`, `pay`, `payWithAuthorization`, `cancelInvoice`, `refundInvoice`, `authorizationNonce`, `statusOf`, `isPaid` |
+| `PayeeRegistry` | Confirmation-of-Payee: name → address mapping. Names are case-sensitive (`keccak256` of the exact string); whoever registers a name first controls it. | `register`, `update`, `remove`, `resolve`, `verify`, `isRegistered` |
+| `AgentWallet` | Budget-controlled agent wallet (OZ `Ownable`). Per-period budget cap with automatic rollover, session expiry, payee allowlist, instant revoke. | `configureSession`, `revoke`, `setPayeeAllowed`, `fund`, `withdraw`, `pay`, `payInvoice`, `remainingBudget`, `sessionActive` |
+| `Checkout` (starter kit) | The kit's minimal pay-per-order contract, deployed unchanged for reference. | `pay`, `payWithAuthorization` |
+
+### Core workflow, step by step
+
+1. **Merchant registers a name** — `PayeeRegistry.register("agentpay-merchant", <payee address>)`.
+   Live: [`0xa696c717…bf3d2b71`](https://explorer-test.qday.info/tx/0xa696c71797fe400f20bb34a19ab9a37ab2e690b7afd98324452e08f8bf3d2b71).
+2. **Merchant creates an invoice** — `InvoiceCheckout.createInvoice(invoiceId, payee, token, amount, deadline, ref)`.
+   The amount is now locked: any payment with a different amount reverts with `WrongAmount(expected, actual)`.
+3. **Agent verifies the payee** — `PayeeRegistry.verify("agentpay-merchant", invoice.payee)` must be `true`
+   before any money moves; the agent script (`examples/src/pay-invoice-agent.ts`) refuses to pay otherwise.
+4. **Agent checks its session** — `AgentWallet.sessionActive()`, the payee in `allowedPayee`, and
+   `remainingBudget()` covering the invoice amount. Over budget reverts with `BudgetExceeded`; a
+   non-allowlisted payee with `PayeeNotAllowed`; an expired session with `SessionExpired`; a revoked
+   session with `SessionRevokedError`.
+5. **Agent pays, gaslessly** — the agent signs an EIP-3009 `ReceiveWithAuthorization` (tUSD8 domain
+   `name: "tUSD8"`, `version: "2"`, nonce `authorizationNonce(payer, invoiceId) =
+   keccak256(payer, invoiceId)`), and a relayer submits `InvoiceCheckout.payWithAuthorization(...)`.
+   Live: [`0x5cd4351e…d132e`](https://explorer-test.qday.info/tx/0x5cd4351e58eb2564a4d23de2ba48fde055cf4a31b95ba575dc44fb8d855d132e).
+   Standard payment (approve + `pay`) also works — live: [`0xb2c31b4c…1971c`](https://explorer-test.qday.info/tx/0xb2c31b4c2da2d98a6ba8c25cda0e7b51858351de22eb183abdd27347c3a1971c).
+   Alternatively the wallet itself pays via `AgentWallet.payInvoice(checkout, invoiceId)`, which
+   approves the checkout for exactly the invoice amount (remaining allowance 0 afterwards).
+6. **Receipt** — the `Paid(invoiceId, payer, payee, amount)` event is the on-chain receipt;
+   `statusOf(invoiceId)` reads `2` (`Paid`). Status values: `0 None, 1 Open, 2 Paid, 3 Cancelled, 4 Refunded`.
+
+### Technology
+
+- **Chain:** QDay Aevum testnet, chain `44005`, EVM **Shanghai** (`evm_version = "shanghai"`,
+  solc `0.8.24` — see `contracts/foundry.toml`; do not change it, Cancun bytecode reverts with `invalid opcode`).
+- **Token:** tUSD8 `0x456569838f1d43009A91ebA4263147Afd7233483`, 6 decimals, EIP-2612 `permit` +
+  EIP-3009 signed transfers, EIP-712 domain `name: "tUSD8"`, `version: "2"`.
+- **Contracts:** Solidity `^0.8.24`, Foundry `1.10.0`, OpenZeppelin (`Ownable`, `SafeERC20`).
+  Tests: `67/67` unit + `7/7` fork against the real tUSD8 (`make check`).
+- **Agent script / examples:** TypeScript + viem (`examples/src/pay-invoice-agent.ts`,
+  pattern from the kit's `examples/pay-gasless.ts`).
+- **Web:** Next.js + wagmi + RainbowKit, `@aevum-kit/aevum` (chain config, ABIs, EIP-3009 typed data, `getLogsChunked`).
+- **Transactions:** legacy (type 0) on testnet; RPC over HTTPS only, no WebSocket; `eth_getLogs` in
+  max 1,000-block chunks.
+
+---
+
+## Environment variables
+
+No `.env` file is committed, and none is needed to build or test. Copy the
+`.env.example` file next to the part you run and fill in only the values you need.
+Never commit a filled-in `.env`, and never put a private key in a file that is
+tracked by git. There is no root `.env.example` and no `contracts/.env.example`;
+deploy-time variables are passed on the command line (see below).
+
+### `examples/.env.example` → `examples/.env`
+
+| Variable | Required? | Example (non-secret) | Used by / for |
+|---|---|---|---|
+| `RPC_URL` | No (default Aevum testnet) | `https://rpc-test.qday.info` | All example scripts. `http://127.0.0.1:8555` for `make fork`, `http://127.0.0.1:8545` for `make anvil`. |
+| `CHECKOUT_ADDRESS` | For kit examples | `0x71f6bC3F9854900095d9A469911f2962DA88168F` | `check-setup`, `pay-gasless`, `read-payments` (kit `Checkout`). |
+| `ADDRESS` | No | `0x29EEbb597abab8208dDf9Af845E11FcceBC44948` | `check-setup` (address to inspect); `read-payments` (filter by payer). |
+| `BUYER_KEY` | For `pay-gasless` | *(test wallet key — never commit)* | `pay-gasless`: signs the EIP-3009 authorization (needs tUSD8, no gas). |
+| `RELAYER_KEY` | For gasless scripts | *(test wallet key — never commit)* | `pay-gasless`, `pay-invoice-agent`: submits the transaction and pays the gas (needs a little tQDAY). |
+| `INVOICE_CHECKOUT_ADDRESS` | For `pay-invoice-agent` | `0x1eeE2A5CeBe0CF61A042cEBbE649c8eE31b5F6A2` | `pay-invoice-agent`: the `InvoiceCheckout` to pay. |
+| `PAYEE_REGISTRY_ADDRESS` | For `pay-invoice-agent` | `0x7424F543673488C1aD319Af1EedE639AB50Fa52b` | `pay-invoice-agent`: the `PayeeRegistry` for the Confirmation-of-Payee check. |
+| `AGENT_WALLET_ADDRESS` | Optional for `pay-invoice-agent` | `0x9C80e633937D1e61d40a43709f9c5a5E47A957b9` | `pay-invoice-agent`: if set, the agent's session, allowlist and remaining budget are checked before paying. |
+| `INVOICE_ID` | For `pay-invoice-agent` | `0x6d8c295035c1a1e8cc8f251fe07da7674403dc2a67257ec6850d03ed8a3dc7f7` | `pay-invoice-agent`: 32-byte hex id of the invoice to pay. |
+| `PAYEE_NAME` | For `pay-invoice-agent` | `agentpay-merchant` | `pay-invoice-agent`: name to verify in the registry. |
+| `AGENT_KEY` | For `pay-invoice-agent` | *(test wallet key — never commit)* | `pay-invoice-agent`: signs the EIP-3009 authorization (needs tUSD8, no gas). |
+
+### `web/.env.example` → `web/.env.local`
+
+| Variable | Required? | Example (non-secret) | Used by / for |
+|---|---|---|---|
+| `NEXT_PUBLIC_NETWORKS` | No (default `aevum`) | `aevum` (live) or `fork,aevum` (local dev) | Which networks the web app offers. Keep it to `aevum` online. |
+| `NEXT_PUBLIC_CHECKOUT_AEVUM` | For live web | `0x71f6bC3F9854900095d9A469911f2962DA88168F` | Kit `Checkout` address on Aevum testnet. |
+| `NEXT_PUBLIC_CHECKOUT_FORK` | For local fork | *(address printed by `make deploy-fork`)* | Kit `Checkout` address on the local fork. |
+| `NEXT_PUBLIC_CHECKOUT_LOCAL` | For local anvil | *(address printed by `make deploy-local`)* | Kit `Checkout` address on local anvil. |
+| `NEXT_PUBLIC_DEPLOY_BLOCK_AEVUM` | No | *(block number of your deploy)* | Activity page: start scanning events from this block. |
+| `NEXT_PUBLIC_DEPLOY_BLOCK_FORK` | No | *(block number of your fork deploy)* | Same, for the fork. |
+| `NEXT_PUBLIC_WC_PROJECT_ID` | No | *(free at cloud.reown.com)* | Enables WalletConnect (mobile wallets). |
+| `NEXT_PUBLIC_REPO_URL` | No | *(your repo URL)* | Docs page "Source" link. |
+| `RELAYER_PRIVATE_KEY` | No (enables gasless) | *(fresh test wallet key — never commit; mark Sensitive on Vercel)* | Server-side relayer: submits signed payments and pays the gas. Refuses anvil's public keys on Aevum testnet. |
+| `RELAYER_DAILY_TX_LIMIT` | No (default `500`) | `500` | Max transactions the relayer sends per day (per server process). |
+| `TRUSTED_IP_HEADER` | No | `x-vercel-forwarded-for` (Vercel) / `cf-connecting-ip` (Cloudflare) | Real client-IP header for the relayer's rate limit. |
+
+### Deploy-time variables (command line, not files)
+
+| Variable | Required? | Example | Used by / for |
+|---|---|---|---|
+| `ACCOUNT` | Yes, for `make deploy-aevum` | `aevum-deployer` | Keystore name created with `cast wallet import <name> --interactive`. Never paste a key into a file or shell history. |
+| `MERCHANT` | No (defaults to deployer) | `0x482EC60cAF715E7Bd06Ddd1176AEa7855697A758` | `make deploy-aevum` / `make deploy-fork`: receives kit `Checkout` payments. |
+| `OWNER` | No (defaults to deployer) | `0x29EEbb597abab8208dDf9Af845E11FcceBC44948` | `make deploy-aevum` / `make deploy-fork`: owns the deployed `AgentWallet`. |
+| `TO` | Yes, for `make deal` / `make mint` | *(your wallet address)* | `make deal`: fork-only, gives tUSD8 + 10 tQDAY. `make mint`: anvil-only, mints MockUSD8. |
+| `AMOUNT` | No (default `100`) | `10` | `make deal` / `make mint`: amount of tokens. |
+| `CHECKOUT` | Yes, for `make mint` | *(address from `make deploy-local`)* | `make mint`: the `Checkout` whose token is minted. |
+| `INVOICE_CHECKOUT` | Yes, for `make smoke-fork` | *(address from `make deploy-fork`)* | `make smoke-fork`: post-deploy smoke test (create invoice → pay exact → Paid) on the fork. |
+
+---
+
+## Reproduce from scratch (turnkey)
+
+Everything below was run against the exact deployed commit
+`93289ae321ab80c004141059f3b658b43ddb3184` (repo HEAD at time of writing: `fb2f76c`).
+No funds are needed for the local steps — the fork copies Aevum's real state and
+`make deal` gives you virtual test balances.
+
+> **Public repo URL: TBD.** The code currently lives in a local repo; the public
+> push to GitHub (`nwijaya26`) is still pending. Until the remote is live, clone
+> the published repo once its URL is announced, or work from the starter-kit
+> baseline the repo was built on
+> (`https://github.com/qday-io/aevum-starter-kit.git`, baseline `e87bcff`) and
+> apply the AgentPay commits on top. Every command below is the same either way.
+
+### Prerequisites
+
+- [Node 22+](https://nodejs.org), [pnpm](https://pnpm.io/installation),
+  [Foundry](https://book.getfoundry.sh/getting-started/installation) (`foundryup`).
+  Verified versions used for this build: Foundry `1.10.0`, pnpm `12.21.0`, Node `v24.22.1`.
+- Git (with submodules — the repo vendors `forge-std` and `openzeppelin-contracts`).
+
+### 1. Clone and install
+
+```bash
+git clone --recursive <public-repo-url>   # TBD — see note above
+cd <repo>
+make install          # Solidity libs + JS packages
+```
+
+### 2. Verify everything locally (no funds, no network account)
+
+```bash
+make check            # build + Shanghai opcode check + unit tests + fork tests + typecheck
+```
+
+Expected result (exit 0):
+
+- `✓ 10 bytecode blobs checked: Shanghai-safe.`
+- Unit tests: **67/67 passed** (Checkout kit 11 · InvoiceCheckout 24 · PayeeRegistry 12 · AgentWallet 20)
+- Fork tests against the real tUSD8: **7/7 passed** (kit 3 · AgentPay 4, including the over-budget revert)
+- `pnpm -r typecheck` passes (examples + web)
+
+Individual steps, if you want them separately: `make build`, `make test`,
+`make test-fork`.
+
+### 3. Run the app against a local copy of Aevum
+
+```bash
+# terminal 1: local copy of Aevum testnet on 127.0.0.1:8555 (chain 440050)
+make fork
+
+# terminal 2: deploy all contracts (Checkout + InvoiceCheckout + PayeeRegistry + AgentWallet)
+make deploy-fork                      # prints all four addresses
+make deal TO=<your wallet address>    # 100 tUSD8 + 10 tQDAY, on the fork only
+
+# smoke test: create an invoice, pay the exact amount, require status Paid
+make smoke-fork INVOICE_CHECKOUT=<address from deploy-fork>
+
+cp web/.env.example web/.env.local
+#   NEXT_PUBLIC_NETWORKS=fork,aevum
+#   NEXT_PUBLIC_CHECKOUT_FORK=<address from deploy-fork>
+make dev                              # http://localhost:3000
+```
+
+Want an empty chain instead of a fork? `make anvil` + `make deploy-local` deploys a
+`MockUSD8` (same decimals, EIP-712 domain and EIP-3009 functions as tUSD8) that
+anyone can mint with `make mint`.
+
+### 4. Deploy to Aevum testnet (chain 44005)
+
+You need test funds first: join the [QDay Discord](https://discord.gg/bYPhjmrSfK),
+react ✅ in `#verify`, then run `/faucet <your address>` — you get **1 tQDAY + 5 tUSD8**,
+once per Discord account and once per address. (The web faucet requires a small
+Ethereum mainnet balance, so it is not usable for a fresh test-only wallet.)
+
+```bash
+cast wallet import aevum-deployer --interactive   # paste the key of a TEST wallet
+cast wallet address --account aevum-deployer      # fund this address from the faucet
+
+make deploy-aevum ACCOUNT=aevum-deployer          # uses real tUSD8; MERCHANT/OWNER default to the deployer
+# MERCHANT=0x... OWNER=0x... make deploy-aevum ACCOUNT=aevum-deployer
+```
+
+The script prints all four deployed addresses. Record them with the exact commit
+SHA in this README's [live deployment](#agentpay-invoice--live-deployment-aevum-builder-challenge-1)
+section — **contract verification on the explorer does not work yet**, so the
+addresses + the exact commit are the official reference (see also
+[Deploy to Aevum testnet](#deploy-to-aevum-testnet)).
+
+### 5. Run the proof scenarios
+
+With the deployed addresses in `examples/.env` (copy `examples/.env.example` first):
+
+```bash
+# Scenario: agent pays one invoice gaslessly, after a Confirmation-of-Payee
+# check and the AgentWallet guard rails
+INVOICE_CHECKOUT_ADDRESS=0x... PAYEE_REGISTRY_ADDRESS=0x... \
+  AGENT_WALLET_ADDRESS=0x... INVOICE_ID=0x... PAYEE_NAME=<name> \
+  pnpm example pay-invoice-agent
+```
+
+Or run the kit's gasless flow against the kit `Checkout`:
+
+```bash
+pnpm example check-setup      # chain, block, gas price and balances of ADDRESS
+pnpm example pay-gasless      # BUYER_KEY signs, RELAYER_KEY submits
+pnpm example read-payments    # every Paid event, 1,000 blocks at a time
+```
+
+Verify each result on chain: `statusOf(invoiceId)` must read `2` (`Paid`), and the
+payee's tUSD8 balance must have grown by exactly the invoice amount. The live
+proof transactions for scenarios #1–#3 are linked in the
+[live deployment](#agentpay-invoice--live-deployment-aevum-builder-challenge-1) section;
+scenarios #4 (over-budget revert) and #5 (post-revoke revert) are still TBD there.
+
 ---
 
 ## Contents
 
 - [AgentPay Invoice — live deployment](#agentpay-invoice--live-deployment-aevum-builder-challenge-1)
+- [AgentPay Invoice — problem, architecture, workflow](#agentpay-invoice--problem-architecture-workflow)
+- [Environment variables](#environment-variables)
+- [Reproduce from scratch (turnkey)](#reproduce-from-scratch-turnkey)
 - [Quickstart (5 minutes, no funds needed)](#quickstart-5-minutes-no-funds-needed)
 - [Network details](#network-details)
 - [Get test tokens](#get-test-tokens)
