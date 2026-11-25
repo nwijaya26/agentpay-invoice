@@ -15,3 +15,8 @@ contracts/cache/
 contracts/broadcast/
 
 .DS_Store
+
+# keystores / private keys (never commit)
+*.keystore
+*.pem
+*.key
